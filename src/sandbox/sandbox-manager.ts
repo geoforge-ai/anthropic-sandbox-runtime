@@ -254,6 +254,20 @@ async function initialize(
   // Initialize network infrastructure
   initializationPromise = (async () => {
     try {
+      // Skip proxy setup if network is unrestricted
+      if (config.network.unrestrictedNetwork) {
+        logForDebugging('Network is unrestricted - skipping proxy setup', {
+          level: 'warn',
+        })
+        const context: HostNetworkManagerContext = {
+          httpProxyPort: 0,
+          socksProxyPort: 0,
+          linuxBridge: undefined,
+        }
+        managerContext = context
+        return context
+      }
+
       // Conditionally start proxy servers based on config
       let httpProxyPort: number
       if (config.network.httpProxyPort !== undefined) {
@@ -534,15 +548,22 @@ async function wrapWithSandbox(
     customConfig?.network?.allowedDomains !== undefined ||
     config?.network?.allowedDomains !== undefined
 
+  // Check if network is unrestricted (allows all network access)
+  const isNetworkUnrestricted =
+    customConfig?.network?.unrestrictedNetwork ??
+    config?.network?.unrestrictedNetwork ??
+    false
+
   // Network RESTRICTION is needed whenever network config is specified
-  // This includes empty allowedDomains which means "block all network"
-  const needsNetworkRestriction = hasNetworkConfig
+  // BUT NOT when network is explicitly unrestricted
+  const needsNetworkRestriction = hasNetworkConfig && !isNetworkUnrestricted
 
   // Network PROXY is needed whenever network config is specified
   // Even with empty allowedDomains, we route through proxy so that:
   // 1. updateConfig() can enable network access for already-running processes
   // 2. The proxy blocks all requests when allowlist is empty
-  const needsNetworkProxy = hasNetworkConfig
+  // BUT NOT when network is explicitly unrestricted
+  const needsNetworkProxy = hasNetworkConfig && !isNetworkUnrestricted
 
   // Wait for network initialization only if proxy is actually needed
   if (needsNetworkProxy) {

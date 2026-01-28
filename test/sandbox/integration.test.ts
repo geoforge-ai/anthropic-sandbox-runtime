@@ -1366,3 +1366,271 @@ describe('Empty allowedDomains Network Blocking Integration', () => {
     })
   })
 })
+
+/**
+ * Integration tests for unrestricted network mode
+ *
+ * When unrestrictedNetwork: true is set, network restrictions are disabled
+ * while filesystem sandboxing remains active.
+ */
+describe('Unrestricted Network Mode Integration', () => {
+  const TEST_DIR = join(process.cwd(), '.sandbox-test-unrestricted-network')
+
+  beforeAll(async () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    // Create test directory
+    if (!existsSync(TEST_DIR)) {
+      mkdirSync(TEST_DIR, { recursive: true })
+    }
+  })
+
+  afterAll(async () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    // Clean up test directory
+    if (existsSync(TEST_DIR)) {
+      rmSync(TEST_DIR, { recursive: true, force: true })
+    }
+
+    await SandboxManager.reset()
+  })
+
+  describe('Network access with unrestrictedNetwork: true', () => {
+    beforeAll(async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Initialize with unrestricted network
+      await SandboxManager.reset()
+      await SandboxManager.initialize({
+        network: {
+          allowedDomains: [], // Would normally block all network
+          deniedDomains: [],
+          unrestrictedNetwork: true, // But this disables restrictions
+        },
+        filesystem: {
+          denyRead: [],
+          allowWrite: [TEST_DIR],
+          denyWrite: [],
+        },
+      })
+    })
+
+    it('should allow HTTP requests to any domain when unrestrictedNetwork is true', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // With unrestrictedNetwork: true, network should be fully accessible
+      const command = await SandboxManager.wrapWithSandbox(
+        'curl -s --max-time 5 http://example.com 2>&1',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+
+      // Should succeed and return HTML (not blocked)
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Example Domain')
+    })
+
+    it('should allow HTTPS requests when unrestrictedNetwork is true', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        'curl -s --max-time 5 https://example.com 2>&1',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+
+      // Should succeed
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Example Domain')
+    })
+
+    it('should still enforce filesystem restrictions when network is unrestricted', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Even with unrestricted network, filesystem should still be sandboxed
+      const testFile = join(tmpdir(), 'unrestricted-net-fs-test.txt')
+
+      // Clean up if exists
+      if (existsSync(testFile)) {
+        unlinkSync(testFile)
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `echo "should fail" > ${testFile}`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        cwd: TEST_DIR,
+        timeout: 5000,
+      })
+
+      // Should fail with read-only file system error
+      const output = (result.stderr || result.stdout || '').toLowerCase()
+      expect(output).toContain('read-only file system')
+      expect(existsSync(testFile)).toBe(false)
+    })
+
+    it('should allow writes within allowed directories when network is unrestricted', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const testFile = join(TEST_DIR, 'unrestricted-net-allowed-write.txt')
+      const testContent = 'test content with unrestricted network'
+
+      // Clean up if exists
+      if (existsSync(testFile)) {
+        unlinkSync(testFile)
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `echo "${testContent}" > unrestricted-net-allowed-write.txt`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        cwd: TEST_DIR,
+        timeout: 5000,
+      })
+
+      // Should succeed
+      expect(result.status).toBe(0)
+      expect(existsSync(testFile)).toBe(true)
+
+      const content = readFileSync(testFile, 'utf8')
+      expect(content.trim()).toBe(testContent)
+
+      // Clean up
+      if (existsSync(testFile)) {
+        unlinkSync(testFile)
+      }
+    })
+
+    it('should allow DNS lookups when unrestrictedNetwork is true', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        'host example.com 2>&1 || nslookup example.com 2>&1',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+
+      // DNS lookup should succeed
+      const output = (result.stdout + result.stderr).toLowerCase()
+      // Should contain resolved address or success indication
+      const dnsSucceeded =
+        output.includes('has address') ||
+        output.includes('address:') ||
+        result.status === 0
+
+      expect(dnsSucceeded).toBe(true)
+    })
+  })
+
+  describe('Contrast: unrestrictedNetwork vs normal allowedDomains', () => {
+    it('should block network with empty allowedDomains and no unrestrictedNetwork', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      await SandboxManager.reset()
+      await SandboxManager.initialize({
+        network: {
+          allowedDomains: [],
+          deniedDomains: [],
+          // unrestrictedNetwork not set - defaults to false
+        },
+        filesystem: {
+          denyRead: [],
+          allowWrite: [TEST_DIR],
+          denyWrite: [],
+        },
+      })
+
+      const command = await SandboxManager.wrapWithSandbox(
+        'curl -s --max-time 2 http://example.com 2>&1 || echo "network_blocked"',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should be blocked
+      const output = (result.stdout + result.stderr).toLowerCase()
+      const isBlocked =
+        output.includes('network_blocked') ||
+        output.includes('blocked') ||
+        output.includes("couldn't connect") ||
+        result.status !== 0
+
+      expect(isBlocked).toBe(true)
+      expect(output).not.toContain('example domain')
+    })
+
+    it('should allow network with empty allowedDomains when unrestrictedNetwork is true', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      await SandboxManager.reset()
+      await SandboxManager.initialize({
+        network: {
+          allowedDomains: [], // Would block all
+          deniedDomains: [],
+          unrestrictedNetwork: true, // Overrides blocking
+        },
+        filesystem: {
+          denyRead: [],
+          allowWrite: [TEST_DIR],
+          denyWrite: [],
+        },
+      })
+
+      const command = await SandboxManager.wrapWithSandbox(
+        'curl -s --max-time 5 http://example.com 2>&1',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+
+      // Should succeed with full network access
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Example Domain')
+    })
+  })
+})

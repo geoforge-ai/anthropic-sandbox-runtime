@@ -61,6 +61,10 @@ async function main(): Promise<void> {
       'read config updates from file descriptor (JSON lines protocol)',
       parseInt,
     )
+    .option(
+      '--unrestricted-network',
+      'disable network restrictions (allows all network access)',
+    )
     .allowUnknownOption()
     .action(
       async (
@@ -70,6 +74,7 @@ async function main(): Promise<void> {
           settings?: string
           c?: string
           controlFd?: number
+          unrestrictedNetwork?: boolean
         },
       ) => {
         try {
@@ -87,6 +92,14 @@ async function main(): Promise<void> {
               `No config found at ${configPath}, using default config`,
             )
             runtimeConfig = getDefaultConfig()
+          }
+
+          // Apply --unrestricted-network flag if specified
+          if (options.unrestrictedNetwork) {
+            runtimeConfig.network.unrestrictedNetwork = true
+            logForDebugging(
+              'Network restrictions disabled via --unrestricted-network flag',
+            )
           }
 
           // Initialize sandbox with config
