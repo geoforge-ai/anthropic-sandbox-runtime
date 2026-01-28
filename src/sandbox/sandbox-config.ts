@@ -116,6 +116,12 @@ export const NetworkConfigSchema = z.object({
   mitmProxy: MitmProxyConfigSchema.optional().describe(
     'Optional MITM proxy configuration. Routes matching domains through an upstream proxy via Unix socket while SRT still handles allow/deny filtering.',
   ),
+  unrestrictedNetwork: z
+    .boolean()
+    .optional()
+    .describe(
+      'If true, disable all network restrictions. Filesystem sandboxing remains active.',
+    ),
 })
 
 /**
