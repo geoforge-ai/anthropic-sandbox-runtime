@@ -11,6 +11,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getPlatform } from '../../src/utils/platform.js'
 import { wrapCommandWithSandboxMacOS } from '../../src/sandbox/macos-sandbox-utils.js'
+// Note: macOS allow-only mode handles system paths internally by allowing all reads
+// then denying major user directories, so we don't need to include getDefaultReadPaths()
+// in the tests.
 import type {
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
@@ -772,5 +775,477 @@ describe('macOS Seatbelt Process Enumeration', () => {
     for (const pid of pids) {
       expect(parseInt(pid.trim(), 10)).toBeGreaterThan(0)
     }
+  })
+})
+
+/**
+ * Tests for macOS Seatbelt allow-only read mode
+ *
+ * These tests verify that the allowRead mode works correctly on macOS,
+ * allowing reads only from specified paths (plus system paths) while
+ * blocking reads from all other locations.
+ */
+describe('macOS Seatbelt Allow-Only Read Mode', () => {
+  const TEST_BASE_DIR = join(tmpdir(), 'seatbelt-allow-read-' + Date.now())
+  const TENANT_A_DIR = join(TEST_BASE_DIR, 'tenant-a')
+  const TENANT_B_DIR = join(TEST_BASE_DIR, 'tenant-b')
+  const SECRETS_DIR = join(TENANT_A_DIR, '.secrets')
+
+  const TENANT_A_DATA = 'TENANT_A_DATA_CONTENT'
+  const TENANT_B_DATA = 'TENANT_B_DATA_CONTENT'
+  const SECRET_DATA = 'SECRET_API_KEY_12345'
+
+  beforeAll(() => {
+    if (skipIfNotMacOS()) {
+      return
+    }
+
+    // Create test directory structure
+    mkdirSync(TENANT_A_DIR, { recursive: true })
+    mkdirSync(TENANT_B_DIR, { recursive: true })
+    mkdirSync(SECRETS_DIR, { recursive: true })
+
+    // Create test files
+    writeFileSync(join(TENANT_A_DIR, 'data.txt'), TENANT_A_DATA)
+    writeFileSync(join(TENANT_B_DIR, 'data.txt'), TENANT_B_DATA)
+    writeFileSync(join(SECRETS_DIR, 'api-key.txt'), SECRET_DATA)
+  })
+
+  afterAll(() => {
+    if (skipIfNotMacOS()) {
+      return
+    }
+
+    // Clean up test directory
+    if (existsSync(TEST_BASE_DIR)) {
+      rmSync(TEST_BASE_DIR, { recursive: true, force: true })
+    }
+  })
+
+  describe('Allow-Only Read - Basic Functionality', () => {
+    it('should allow reading from explicitly allowed path', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [],
+      }
+
+      const wrappedCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${join(TENANT_A_DIR, 'data.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain(TENANT_A_DATA)
+    })
+
+    it('should block reading from path outside allowlist', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [],
+      }
+
+      const wrappedCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${join(TENANT_B_DIR, 'data.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - tenant B's directory is not in allowOnly
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+      expect(result.stdout).not.toContain(TENANT_B_DATA)
+    })
+
+    it('should block reading from denyWithinAllow path', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [SECRETS_DIR],
+      }
+
+      const wrappedCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${join(SECRETS_DIR, 'api-key.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - secrets are in denyWithinAllow
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+      expect(result.stdout).not.toContain(SECRET_DATA)
+    })
+
+    it('should allow system commands to work (system paths readable)', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [],
+      }
+
+      // ls command requires reading /bin or /usr/bin
+      // Use ls /bin to verify system paths are readable
+      const wrappedCommand = wrapCommandWithSandboxMacOS({
+        command: 'ls /bin | head -5',
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      // Should see typical /bin entries like bash, cat, ls, etc.
+      expect(result.stdout).toMatch(/bash|cat|ls|sh/i)
+    })
+
+    it('should allow echo and basic shell operations', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [],
+      }
+
+      const wrappedCommand = wrapCommandWithSandboxMacOS({
+        command: 'echo "Hello from sandbox"',
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Hello from sandbox')
+    })
+  })
+
+  describe('Allow-Only Read - Move Prevention', () => {
+    it('should block moving files from denyWithinAllow to readable location', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [SECRETS_DIR],
+      }
+
+      const movedFile = join(TENANT_A_DIR, 'moved-secret.txt')
+
+      const wrappedCommand = wrapCommandWithSandboxMacOS({
+        command: `mv ${join(SECRETS_DIR, 'api-key.txt')} ${movedFile}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - cannot move denied files
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify file was NOT moved
+      expect(existsSync(join(SECRETS_DIR, 'api-key.txt'))).toBe(true)
+      expect(existsSync(movedFile)).toBe(false)
+    })
+
+    it('should block moving denyWithinAllow directory', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [SECRETS_DIR],
+      }
+
+      const movedDir = join(TENANT_A_DIR, 'moved-secrets')
+
+      const wrappedCommand = wrapCommandWithSandboxMacOS({
+        command: `mv ${SECRETS_DIR} ${movedDir}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const result = spawnSync(wrappedCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - cannot move denied directories
+      expect(result.status).not.toBe(0)
+      const output = (result.stderr || '').toLowerCase()
+      expect(output).toContain('operation not permitted')
+
+      // Verify directory was NOT moved
+      expect(existsSync(SECRETS_DIR)).toBe(true)
+      expect(existsSync(movedDir)).toBe(false)
+    })
+  })
+
+  describe('Allow-Only Read with Write Restrictions', () => {
+    it('should enforce both read and write restrictions simultaneously', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [SECRETS_DIR],
+      }
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [SECRETS_DIR],
+      }
+
+      // Should be able to read from allowed path
+      const readCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${join(TENANT_A_DIR, 'data.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig,
+      })
+
+      const readResult = spawnSync(readCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(readResult.status).toBe(0)
+      expect(readResult.stdout).toContain(TENANT_A_DATA)
+
+      // Should be able to write to allowed path
+      const testFile = join(TENANT_A_DIR, 'write-test.txt')
+      const writeCommand = wrapCommandWithSandboxMacOS({
+        command: `echo "test content" > ${testFile}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig,
+      })
+
+      const writeResult = spawnSync(writeCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(writeResult.status).toBe(0)
+      expect(existsSync(testFile)).toBe(true)
+
+      // Should NOT be able to read from tenant B
+      const blockedReadCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${join(TENANT_B_DIR, 'data.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig,
+      })
+
+      const blockedReadResult = spawnSync(blockedReadCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(blockedReadResult.status).not.toBe(0)
+      expect(blockedReadResult.stdout).not.toContain(TENANT_B_DATA)
+
+      // Should NOT be able to write to tenant B
+      const blockedWriteCommand = wrapCommandWithSandboxMacOS({
+        command: `echo "hacked" > ${join(TENANT_B_DIR, 'hacked.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig,
+      })
+
+      const blockedWriteResult = spawnSync(blockedWriteCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(blockedWriteResult.status).not.toBe(0)
+      expect(existsSync(join(TENANT_B_DIR, 'hacked.txt'))).toBe(false)
+
+      // Cleanup
+      if (existsSync(testFile)) {
+        rmSync(testFile)
+      }
+    })
+
+    it('should work with unrestricted network (filesystem-only sandboxing)', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [],
+      }
+
+      const writeConfig: FsWriteRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [],
+      }
+
+      // Network should work (no restriction)
+      const networkCommand = wrapCommandWithSandboxMacOS({
+        command: 'curl -s --max-time 5 http://example.com',
+        needsNetworkRestriction: false, // No network restriction
+        readConfig,
+        writeConfig,
+      })
+
+      const networkResult = spawnSync(networkCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+
+      expect(networkResult.status).toBe(0)
+      expect(networkResult.stdout).toContain('Example Domain')
+
+      // But filesystem restrictions should still apply
+      const blockedReadCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${join(TENANT_B_DIR, 'data.txt')}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig,
+      })
+
+      const blockedReadResult = spawnSync(blockedReadCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(blockedReadResult.status).not.toBe(0)
+      expect(blockedReadResult.stdout).not.toContain(TENANT_B_DATA)
+    })
+  })
+
+  describe('Allow-Only Read - Glob Patterns', () => {
+    it('should support glob patterns in denyWithinAllow', () => {
+      if (skipIfNotMacOS()) {
+        return
+      }
+
+      // Create additional test files
+      const secretTxt = join(TENANT_A_DIR, 'secret.txt')
+      const normalLog = join(TENANT_A_DIR, 'normal.log')
+      writeFileSync(secretTxt, 'SECRET_TXT_CONTENT')
+      writeFileSync(normalLog, 'NORMAL_LOG_CONTENT')
+
+      // macOS allow-only mode handles system paths internally
+      const readConfig: FsReadRestrictionConfig = {
+        allowOnly: [TENANT_A_DIR],
+        denyWithinAllow: [join(TENANT_A_DIR, '*.txt')], // Block all .txt files
+      }
+
+      // Should block reading .txt file
+      const txtCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${secretTxt}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const txtResult = spawnSync(txtCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(txtResult.status).not.toBe(0)
+      expect(txtResult.stdout).not.toContain('SECRET_TXT_CONTENT')
+
+      // Should allow reading .log file (not in glob pattern)
+      const logCommand = wrapCommandWithSandboxMacOS({
+        command: `cat ${normalLog}`,
+        needsNetworkRestriction: false,
+        readConfig,
+        writeConfig: undefined,
+      })
+
+      const logResult = spawnSync(logCommand, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(logResult.status).toBe(0)
+      expect(logResult.stdout).toContain('NORMAL_LOG_CONTENT')
+
+      // Cleanup
+      rmSync(secretTxt)
+      rmSync(normalLog)
+    })
   })
 })
