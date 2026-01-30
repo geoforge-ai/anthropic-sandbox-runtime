@@ -22,9 +22,16 @@ export {
 export type {
   SandboxAskCallback,
   FsReadRestrictionConfig,
+  FsReadDenyOnlyConfig,
+  FsReadAllowOnlyConfig,
   FsWriteRestrictionConfig,
   NetworkRestrictionConfig,
   NetworkHostPattern,
+} from './sandbox/sandbox-schemas.js'
+
+export {
+  isReadDenyOnlyConfig,
+  isReadAllowOnlyConfig,
 } from './sandbox/sandbox-schemas.js'
 
 // Platform-specific utilities
@@ -32,7 +39,10 @@ export type { SandboxViolationEvent } from './sandbox/macos-sandbox-utils.js'
 export { type SandboxDependencyCheck } from './sandbox/linux-sandbox-utils.js'
 
 // Utility functions
-export { getDefaultWritePaths } from './sandbox/sandbox-utils.js'
+export {
+  getDefaultWritePaths,
+  getDefaultReadPaths,
+} from './sandbox/sandbox-utils.js'
 
 // Platform utilities
 export { getWslVersion } from './utils/platform.js'

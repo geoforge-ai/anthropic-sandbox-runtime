@@ -127,21 +127,47 @@ export const NetworkConfigSchema = z.object({
 /**
  * Filesystem configuration schema for validation
  */
-export const FilesystemConfigSchema = z.object({
-  denyRead: z.array(filesystemPathSchema).describe('Paths denied for reading'),
-  allowWrite: z
-    .array(filesystemPathSchema)
-    .describe('Paths allowed for writing'),
-  denyWrite: z
-    .array(filesystemPathSchema)
-    .describe('Paths denied for writing (takes precedence over allowWrite)'),
-  allowGitConfig: z
-    .boolean()
-    .optional()
-    .describe(
-      'Allow writes to .git/config files (default: false). Enables git remote URL updates while keeping .git/hooks protected.',
-    ),
-})
+export const FilesystemConfigSchema = z
+  .object({
+    denyRead: z
+      .array(filesystemPathSchema)
+      .optional()
+      .describe('Paths denied for reading (deny-only mode)'),
+    allowRead: z
+      .array(filesystemPathSchema)
+      .optional()
+      .describe(
+        'Paths allowed for reading (allow-only mode). System paths always readable.',
+      ),
+    denyReadWithinAllow: z
+      .array(filesystemPathSchema)
+      .optional()
+      .describe('Paths denied within allowed read paths'),
+    allowWrite: z
+      .array(filesystemPathSchema)
+      .describe('Paths allowed for writing'),
+    denyWrite: z
+      .array(filesystemPathSchema)
+      .describe('Paths denied for writing (takes precedence over allowWrite)'),
+    allowGitConfig: z
+      .boolean()
+      .optional()
+      .describe(
+        'Allow writes to .git/config files (default: false). Enables git remote URL updates while keeping .git/hooks protected.',
+      ),
+  })
+  .refine(
+    data => {
+      // Cannot use both denyRead and allowRead simultaneously
+      const hasDenyRead = data.denyRead && data.denyRead.length > 0
+      const hasAllowRead = data.allowRead && data.allowRead.length > 0
+      return !(hasDenyRead && hasAllowRead)
+    },
+    {
+      message:
+        'Cannot use both denyRead and allowRead simultaneously. Use denyRead for deny-only mode or allowRead for allow-only mode.',
+    },
+  )
 
 /**
  * Configuration schema for ignoring specific sandbox violations

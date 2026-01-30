@@ -19,6 +19,10 @@ import type {
   FsWriteRestrictionConfig,
 } from './sandbox-schemas.js'
 import {
+  isReadDenyOnlyConfig,
+  isReadAllowOnlyConfig,
+} from './sandbox-schemas.js'
+import {
   generateSeccompFilter,
   cleanupSeccompFilter,
   getPreGeneratedBpfPath,
@@ -681,31 +685,99 @@ async function generateFilesystemArgs(
     args.push('--bind', '/', '/')
   }
 
-  // Handle read restrictions by mounting tmpfs over denied paths
-  const readDenyPaths = [...(readConfig?.denyOnly || [])]
+  // Handle read restrictions
+  if (readConfig && isReadAllowOnlyConfig(readConfig)) {
+    // Allow-only mode: Only specified paths are readable
+    // Note: We've already set up --ro-bind / / for the write config above
+    // Now we need to hide everything EXCEPT the allowed paths
 
-  // Always hide /etc/ssh/ssh_config.d to avoid permission issues with OrbStack
-  // SSH is very strict about config file permissions and ownership, and they can
-  // appear wrong inside the sandbox causing "Bad owner or permissions" errors
-  if (fs.existsSync('/etc/ssh/ssh_config.d')) {
-    readDenyPaths.push('/etc/ssh/ssh_config.d')
-  }
+    // Build a set of allowed paths for efficient lookup
+    const allowedReadPaths: string[] = []
+    for (const pathPattern of readConfig.allowOnly || []) {
+      const normalizedPath = normalizePathForSandbox(pathPattern)
 
-  for (const pathPattern of readDenyPaths) {
-    const normalizedPath = normalizePathForSandbox(pathPattern)
-    if (!fs.existsSync(normalizedPath)) {
       logForDebugging(
-        `[Sandbox Linux] Skipping non-existent read deny path: ${normalizedPath}`,
+        `[Sandbox Linux] Processing allowed read path: ${pathPattern} -> ${normalizedPath}`,
       )
-      continue
+
+      // Skip paths that don't exist
+      if (!fs.existsSync(normalizedPath)) {
+        logForDebugging(
+          `[Sandbox Linux] Skipping non-existent allowed read path: ${normalizedPath}`,
+        )
+        continue
+      }
+
+      allowedReadPaths.push(normalizedPath)
     }
 
-    const readDenyStat = fs.statSync(normalizedPath)
-    if (readDenyStat.isDirectory()) {
-      args.push('--tmpfs', normalizedPath)
-    } else {
-      // For files, bind /dev/null instead of tmpfs
-      args.push('--ro-bind', '/dev/null', normalizedPath)
+    // Deny reads within allowed paths
+    for (const pathPattern of readConfig.denyWithinAllow || []) {
+      const normalizedPath = normalizePathForSandbox(pathPattern)
+
+      // Check if this denied path is within any allowed read path
+      const isWithinAllowedPath = allowedReadPaths.some(
+        allowedPath =>
+          normalizedPath.startsWith(allowedPath + '/') ||
+          normalizedPath === allowedPath,
+      )
+
+      if (!isWithinAllowedPath) {
+        logForDebugging(
+          `[Sandbox Linux] Skipping deny read path not within allowed paths: ${normalizedPath}`,
+        )
+        continue
+      }
+
+      if (!fs.existsSync(normalizedPath)) {
+        logForDebugging(
+          `[Sandbox Linux] Skipping non-existent deny read path: ${normalizedPath}`,
+        )
+        continue
+      }
+
+      const readDenyStat = fs.statSync(normalizedPath)
+      if (readDenyStat.isDirectory()) {
+        args.push('--tmpfs', normalizedPath)
+      } else {
+        args.push('--ro-bind', '/dev/null', normalizedPath)
+      }
+
+      logForDebugging(
+        `[Sandbox Linux] Blocked read access to: ${normalizedPath}`,
+      )
+    }
+  } else {
+    // Deny-only mode (default): All reads allowed except specified paths
+    const readDenyPaths = [
+      ...(readConfig && isReadDenyOnlyConfig(readConfig)
+        ? readConfig.denyOnly
+        : []),
+    ]
+
+    // Always hide /etc/ssh/ssh_config.d to avoid permission issues with OrbStack
+    // SSH is very strict about config file permissions and ownership, and they can
+    // appear wrong inside the sandbox causing "Bad owner or permissions" errors
+    if (fs.existsSync('/etc/ssh/ssh_config.d')) {
+      readDenyPaths.push('/etc/ssh/ssh_config.d')
+    }
+
+    for (const pathPattern of readDenyPaths) {
+      const normalizedPath = normalizePathForSandbox(pathPattern)
+      if (!fs.existsSync(normalizedPath)) {
+        logForDebugging(
+          `[Sandbox Linux] Skipping non-existent read deny path: ${normalizedPath}`,
+        )
+        continue
+      }
+
+      const readDenyStat = fs.statSync(normalizedPath)
+      if (readDenyStat.isDirectory()) {
+        args.push('--tmpfs', normalizedPath)
+      } else {
+        // For files, bind /dev/null instead of tmpfs
+        args.push('--ro-bind', '/dev/null', normalizedPath)
+      }
     }
   }
 
@@ -782,8 +854,12 @@ export async function wrapCommandWithSandboxLinux(
 
   // Determine if we have restrictions to apply
   // Read: denyOnly pattern - empty array means no restrictions
+  //       allowOnly pattern - any config (even empty allowOnly) means restrictions
   // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
-  const hasReadRestrictions = readConfig && readConfig.denyOnly.length > 0
+  const hasReadRestrictions =
+    readConfig &&
+    ((isReadDenyOnlyConfig(readConfig) && readConfig.denyOnly.length > 0) ||
+      isReadAllowOnlyConfig(readConfig))
   const hasWriteRestrictions = writeConfig !== undefined
 
   // Check if we need any sandboxing

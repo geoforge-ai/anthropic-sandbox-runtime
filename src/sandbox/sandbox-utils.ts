@@ -292,6 +292,112 @@ export function getDefaultWritePaths(): string[] {
 }
 
 /**
+ * Get system paths that must be readable for sandbox operation when using allow-only read mode.
+ *
+ * These paths are required for:
+ * - Running executables and system commands
+ * - Dynamic library loading
+ * - SSL/TLS certificate verification
+ * - Device file access
+ * - Temp file operations
+ * - Package manager operation (npm, pip, etc.)
+ */
+export function getDefaultReadPaths(): string[] {
+  const platform = getPlatform()
+  const homeDir = homedir()
+
+  // Core paths required on all platforms
+  const corePaths = [
+    // Executables and libraries
+    '/usr/bin',
+    '/usr/lib',
+    '/usr/lib64',
+    '/usr/libexec',
+    '/bin',
+    '/lib',
+    '/lib64',
+    '/sbin',
+    '/usr/sbin',
+
+    // System configuration
+    '/etc',
+
+    // Device files
+    '/dev',
+
+    // Temp directories
+    '/tmp',
+    '/private/tmp',
+
+    // SSL certificates
+    '/etc/ssl',
+    '/usr/share/ca-certificates',
+    '/etc/pki',
+
+    // Shared data
+    '/usr/share',
+
+    // Home directory read access for dotfiles and configs
+    path.join(homeDir, '.bashrc'),
+    path.join(homeDir, '.bash_profile'),
+    path.join(homeDir, '.zshrc'),
+    path.join(homeDir, '.profile'),
+    path.join(homeDir, '.npmrc'),
+    path.join(homeDir, '.gitconfig'),
+    path.join(homeDir, '.ssh'),
+    path.join(homeDir, '.config'),
+    path.join(homeDir, '.local/share'),
+  ]
+
+  // Platform-specific paths
+  if (platform === 'macos') {
+    return [
+      ...corePaths,
+      // Homebrew paths
+      '/opt/homebrew',
+      '/usr/local/Cellar',
+      '/usr/local/opt',
+      '/usr/local/bin',
+      '/usr/local/lib',
+
+      // macOS system paths
+      '/System',
+      '/Library',
+      '/private/var',
+      '/var',
+
+      // Xcode/developer tools
+      '/Applications/Xcode.app',
+      '/Library/Developer',
+
+      // macOS private directories (symlink targets)
+      '/private/etc',
+    ]
+  }
+
+  // Linux-specific paths
+  return [
+    ...corePaths,
+    // Process and system info
+    '/proc',
+    '/sys',
+
+    // Runtime data
+    '/run',
+    '/var/run',
+    '/var/lib',
+    '/var/cache',
+
+    // Linux library paths
+    '/usr/local/lib',
+    '/usr/local/bin',
+
+    // Common tool locations
+    '/opt',
+  ]
+}
+
+/**
  * Generate proxy environment variables for sandboxed processes
  */
 export function generateProxyEnvVars(
