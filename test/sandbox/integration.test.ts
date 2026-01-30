@@ -6,6 +6,7 @@ import {
   mkdirSync,
   rmSync,
   readFileSync,
+  writeFileSync,
 } from 'node:fs'
 import type { Server } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -1631,6 +1632,634 @@ describe('Unrestricted Network Mode Integration', () => {
       // Should succeed with full network access
       expect(result.status).toBe(0)
       expect(result.stdout).toContain('Example Domain')
+    })
+  })
+})
+
+/**
+ * Integration tests for allowRead mode (allow-only read restrictions)
+ *
+ * These tests verify that when allowRead is specified, only paths in the allowlist
+ * (plus system paths) are readable. This is useful for multi-tenant filesystem isolation.
+ */
+describe('Allow-Only Read Mode Integration', () => {
+  const TEST_DIR = join(process.cwd(), '.sandbox-test-allow-read')
+  const ALLOWED_SUBDIR = join(TEST_DIR, 'allowed')
+  const DENIED_SUBDIR = join(TEST_DIR, 'denied')
+  const SECRET_FILE = join(ALLOWED_SUBDIR, '.secrets')
+
+  beforeAll(async () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    // Create test directory structure
+    if (!existsSync(TEST_DIR)) {
+      mkdirSync(TEST_DIR, { recursive: true })
+    }
+    if (!existsSync(ALLOWED_SUBDIR)) {
+      mkdirSync(ALLOWED_SUBDIR, { recursive: true })
+    }
+    if (!existsSync(DENIED_SUBDIR)) {
+      mkdirSync(DENIED_SUBDIR, { recursive: true })
+    }
+
+    // Create test files
+    writeFileSync(join(ALLOWED_SUBDIR, 'data.txt'), 'allowed data')
+    writeFileSync(SECRET_FILE, 'secret data')
+    writeFileSync(join(DENIED_SUBDIR, 'other.txt'), 'denied data')
+  })
+
+  afterAll(async () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    // Clean up test directory
+    if (existsSync(TEST_DIR)) {
+      rmSync(TEST_DIR, { recursive: true, force: true })
+    }
+
+    await SandboxManager.reset()
+  })
+
+  describe('Reading with allowRead restriction', () => {
+    beforeAll(async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Initialize with allowRead restriction
+      await SandboxManager.reset()
+      await SandboxManager.initialize({
+        network: {
+          allowedDomains: [],
+          deniedDomains: [],
+          unrestrictedNetwork: true, // Focus on filesystem, not network
+        },
+        filesystem: {
+          allowRead: [ALLOWED_SUBDIR], // Only allow reading from this directory
+          denyReadWithinAllow: [SECRET_FILE], // Except this file
+          allowWrite: [TEST_DIR],
+          denyWrite: [],
+        },
+      })
+    })
+
+    it('should allow reading from explicitly allowed path', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const testFile = join(ALLOWED_SUBDIR, 'data.txt')
+      const command = await SandboxManager.wrapWithSandbox(`cat ${testFile}`)
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('allowed data')
+    })
+
+    it('should block reading from path outside allowed list', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const testFile = join(DENIED_SUBDIR, 'other.txt')
+      const command = await SandboxManager.wrapWithSandbox(
+        `cat ${testFile} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - file outside allowed paths
+      // On Linux with bwrap, the file won't be visible (ENOENT or permission denied)
+      const output = (result.stderr || result.stdout || '').toLowerCase()
+      const isBlocked =
+        result.status !== 0 ||
+        output.includes('no such file') ||
+        output.includes('permission denied') ||
+        output.includes('denied data') === false
+
+      expect(isBlocked).toBe(true)
+      expect(result.stdout).not.toContain('denied data')
+    })
+
+    it('should block reading from denyReadWithinAllow path', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `cat ${SECRET_FILE} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - file is explicitly denied even within allowed path
+      const output = (result.stderr || result.stdout || '').toLowerCase()
+      const isBlocked =
+        result.status !== 0 ||
+        output.includes('no such file') ||
+        output.includes('permission denied') ||
+        output.includes('input/output error')
+
+      expect(isBlocked).toBe(true)
+      expect(result.stdout).not.toContain('secret data')
+    })
+
+    it('should allow system commands to run (system paths always readable)', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // ls should work because /bin and /usr/bin are in getDefaultReadPaths()
+      const command = await SandboxManager.wrapWithSandbox('ls -la / 2>&1')
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should succeed - ls binary and system directories are allowed
+      expect(result.status).toBe(0)
+      // Should see typical root directory entries
+      expect(result.stdout).toMatch(/usr|bin|etc/i)
+    })
+
+    it('should allow shell to work (bash/zsh in system paths)', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        'echo "Hello from sandbox"',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Hello from sandbox')
+    })
+
+    it('should allow writing to allowed write paths', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const testFile = join(ALLOWED_SUBDIR, 'write-test.txt')
+      const command = await SandboxManager.wrapWithSandbox(
+        `echo "new content" > ${testFile}`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(existsSync(testFile)).toBe(true)
+
+      const content = readFileSync(testFile, 'utf8')
+      expect(content.trim()).toBe('new content')
+
+      // Cleanup
+      if (existsSync(testFile)) {
+        unlinkSync(testFile)
+      }
+    })
+
+    it('should block reading home directory when not in allowRead', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Home directory should not be readable (except system paths like .bashrc)
+      // Note: getDefaultReadPaths includes specific dotfiles but not the whole home dir
+      const command = await SandboxManager.wrapWithSandbox(
+        'ls ~/Documents 2>&1 || echo "read_blocked"',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail or show blocked
+      const output = (result.stdout + result.stderr).toLowerCase()
+      const isBlocked =
+        output.includes('read_blocked') ||
+        output.includes('no such file') ||
+        output.includes('permission denied') ||
+        output.includes('cannot access')
+
+      expect(isBlocked).toBe(true)
+    })
+  })
+
+  describe('Contrast: allowRead vs denyRead behavior', () => {
+    it('denyRead should allow all reads except specified paths', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Reinitialize with denyRead (deny-only mode)
+      await SandboxManager.reset()
+      await SandboxManager.initialize({
+        network: {
+          allowedDomains: [],
+          deniedDomains: [],
+          unrestrictedNetwork: true,
+        },
+        filesystem: {
+          denyRead: [SECRET_FILE], // Only deny this specific file
+          allowWrite: [TEST_DIR],
+          denyWrite: [],
+        },
+      })
+
+      // Should be able to read from DENIED_SUBDIR (not in denyRead)
+      const testFile = join(DENIED_SUBDIR, 'other.txt')
+      const command1 = await SandboxManager.wrapWithSandbox(`cat ${testFile}`)
+
+      const result1 = spawnSync(command1, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result1.status).toBe(0)
+      expect(result1.stdout).toContain('denied data')
+
+      // But SECRET_FILE should be blocked
+      const command2 = await SandboxManager.wrapWithSandbox(
+        `cat ${SECRET_FILE} 2>&1`,
+      )
+
+      const result2 = spawnSync(command2, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail or return empty/error
+      expect(result2.stdout).not.toContain('secret data')
+    })
+
+    it('allowRead should block all reads except specified paths and system paths', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Reinitialize with allowRead (allow-only mode)
+      await SandboxManager.reset()
+      await SandboxManager.initialize({
+        network: {
+          allowedDomains: [],
+          deniedDomains: [],
+          unrestrictedNetwork: true,
+        },
+        filesystem: {
+          allowRead: [ALLOWED_SUBDIR], // Only allow this directory
+          allowWrite: [TEST_DIR],
+          denyWrite: [],
+        },
+      })
+
+      // Should NOT be able to read from DENIED_SUBDIR
+      const testFile = join(DENIED_SUBDIR, 'other.txt')
+      const command = await SandboxManager.wrapWithSandbox(
+        `cat ${testFile} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - not in allowRead list
+      expect(result.stdout).not.toContain('denied data')
+    })
+  })
+})
+
+/**
+ * Integration tests for filesystem sandboxing with unrestricted network
+ *
+ * These tests verify that allowRead and allowWrite work correctly when
+ * network restrictions are disabled via unrestrictedNetwork: true.
+ * This is the typical configuration for multi-tenant filesystem isolation
+ * where network access is handled separately.
+ */
+describe('Filesystem Sandboxing with Unrestricted Network', () => {
+  const TEST_DIR = join(process.cwd(), '.sandbox-test-fs-unrestricted-net')
+  const TENANT_A_DIR = join(TEST_DIR, 'tenants/customer-a')
+  const TENANT_B_DIR = join(TEST_DIR, 'tenants/customer-b')
+  const SECRETS_DIR = join(TENANT_A_DIR, '.secrets')
+
+  beforeAll(async () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    // Create test directory structure simulating multi-tenant environment
+    mkdirSync(TENANT_A_DIR, { recursive: true })
+    mkdirSync(TENANT_B_DIR, { recursive: true })
+    mkdirSync(SECRETS_DIR, { recursive: true })
+
+    // Create test files
+    writeFileSync(join(TENANT_A_DIR, 'data.txt'), 'customer-a-data')
+    writeFileSync(join(TENANT_B_DIR, 'data.txt'), 'customer-b-data')
+    writeFileSync(join(SECRETS_DIR, 'api-key.txt'), 'secret-api-key-12345')
+  })
+
+  afterAll(async () => {
+    if (skipIfNotLinux()) {
+      return
+    }
+
+    // Clean up test directory
+    if (existsSync(TEST_DIR)) {
+      rmSync(TEST_DIR, { recursive: true, force: true })
+    }
+
+    await SandboxManager.reset()
+  })
+
+  describe('Multi-tenant isolation with allowRead + allowWrite + unrestrictedNetwork', () => {
+    beforeAll(async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Initialize sandbox for customer-a tenant:
+      // - Can read only from their directory (+ system paths)
+      // - Can write only to their directory
+      // - Network is unrestricted (no proxy filtering)
+      // - Secrets within their directory are blocked
+      await SandboxManager.reset()
+      await SandboxManager.initialize({
+        network: {
+          allowedDomains: [], // Would block all, but...
+          deniedDomains: [],
+          unrestrictedNetwork: true, // ...this disables network restrictions
+        },
+        filesystem: {
+          allowRead: [TENANT_A_DIR], // Only allow reading tenant A's directory
+          denyReadWithinAllow: [SECRETS_DIR], // Block secrets even within allowed path
+          allowWrite: [TENANT_A_DIR], // Only allow writing to tenant A's directory
+          denyWrite: [SECRETS_DIR], // Block writes to secrets
+        },
+      })
+    })
+
+    it('should allow reading from tenant A directory', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `cat ${join(TENANT_A_DIR, 'data.txt')}`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('customer-a-data')
+    })
+
+    it('should block reading from tenant B directory (not in allowRead)', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `cat ${join(TENANT_B_DIR, 'data.txt')} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - tenant B's directory is not in allowRead
+      expect(result.stdout).not.toContain('customer-b-data')
+      const output = (result.stderr || result.stdout || '').toLowerCase()
+      const isBlocked =
+        result.status !== 0 ||
+        output.includes('no such file') ||
+        output.includes('permission denied')
+      expect(isBlocked).toBe(true)
+    })
+
+    it('should block reading secrets within allowed tenant directory', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `cat ${join(SECRETS_DIR, 'api-key.txt')} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - secrets are in denyReadWithinAllow
+      expect(result.stdout).not.toContain('secret-api-key')
+    })
+
+    it('should allow writing to tenant A directory', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const testFile = join(TENANT_A_DIR, 'write-test.txt')
+      const content = 'new-content-from-sandbox'
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `echo "${content}" > ${testFile}`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(existsSync(testFile)).toBe(true)
+      expect(readFileSync(testFile, 'utf8').trim()).toBe(content)
+
+      // Cleanup
+      if (existsSync(testFile)) {
+        unlinkSync(testFile)
+      }
+    })
+
+    it('should block writing to tenant B directory', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const testFile = join(TENANT_B_DIR, 'hacked.txt')
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `echo "hacked" > ${testFile} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - tenant B's directory is not in allowWrite
+      const output = (result.stderr || result.stdout || '').toLowerCase()
+      expect(output).toContain('read-only file system')
+      expect(existsSync(testFile)).toBe(false)
+    })
+
+    it('should block writing to secrets directory', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      const testFile = join(SECRETS_DIR, 'new-secret.txt')
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `echo "evil" > ${testFile} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - secrets directory is in denyWrite
+      const output = (result.stderr || result.stdout || '').toLowerCase()
+      expect(output).toContain('read-only file system')
+      expect(existsSync(testFile)).toBe(false)
+    })
+
+    it('should allow network access (unrestricted mode)', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // With unrestrictedNetwork: true, network should work even with empty allowedDomains
+      const command = await SandboxManager.wrapWithSandbox(
+        'curl -s --max-time 5 http://example.com 2>&1',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+
+      // Network should be accessible
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('Example Domain')
+    })
+
+    it('should allow system commands to work (ls, cat, echo, etc.)', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Verify that system binaries are accessible
+      const command = await SandboxManager.wrapWithSandbox(
+        'ls -la /bin | head -5 && echo "System commands work!"',
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('System commands work!')
+    })
+
+    it('should allow git operations within tenant directory', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Initialize a git repo in tenant A's directory
+      const command = await SandboxManager.wrapWithSandbox(
+        `cd ${TENANT_A_DIR} && git init --initial-branch=main 2>&1 && git status`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+
+      expect(result.status).toBe(0)
+      expect(result.stdout).toMatch(/initialized|on branch main/i)
+
+      // Cleanup git directory
+      const gitDir = join(TENANT_A_DIR, '.git')
+      if (existsSync(gitDir)) {
+        rmSync(gitDir, { recursive: true, force: true })
+      }
+    })
+
+    it('should enforce both read and write restrictions simultaneously', async () => {
+      if (skipIfNotLinux()) {
+        return
+      }
+
+      // Try to copy a file from tenant B to tenant A
+      // This should fail because we can't read from tenant B
+      const srcFile = join(TENANT_B_DIR, 'data.txt')
+      const dstFile = join(TENANT_A_DIR, 'copied.txt')
+
+      const command = await SandboxManager.wrapWithSandbox(
+        `cp ${srcFile} ${dstFile} 2>&1`,
+      )
+
+      const result = spawnSync(command, {
+        shell: true,
+        encoding: 'utf8',
+        timeout: 5000,
+      })
+
+      // Should fail - can't read from tenant B
+      expect(result.status).not.toBe(0)
+      expect(existsSync(dstFile)).toBe(false)
     })
   })
 })
