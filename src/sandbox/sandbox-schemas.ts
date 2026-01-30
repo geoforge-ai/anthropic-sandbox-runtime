@@ -10,8 +10,51 @@
  *
  * This is maximally permissive by default - only explicitly denied paths are blocked.
  */
-export interface FsReadRestrictionConfig {
+export interface FsReadDenyOnlyConfig {
   denyOnly: string[]
+}
+
+/**
+ * Read restriction config using an "allow-only" pattern.
+ *
+ * Semantics:
+ * - `{allowOnly: [], denyWithinAllow: []}` = maximally restrictive (deny ALL reads except system paths)
+ * - `{allowOnly: [...paths], denyWithinAllow: [...]}` = allow reads only from these paths (plus system paths),
+ *   with exceptions for denyWithinAllow
+ *
+ * This is maximally restrictive by default - only explicitly allowed paths are readable.
+ * System paths required for sandbox operation are always included automatically.
+ * Note: Empty `allowOnly` means only system paths are readable.
+ */
+export interface FsReadAllowOnlyConfig {
+  allowOnly: string[]
+  denyWithinAllow: string[]
+}
+
+/**
+ * Union type for read restriction configurations.
+ * Supports either deny-only (current default) or allow-only (for multi-tenant isolation).
+ */
+export type FsReadRestrictionConfig =
+  | FsReadDenyOnlyConfig
+  | FsReadAllowOnlyConfig
+
+/**
+ * Type guard to check if read config is deny-only mode
+ */
+export function isReadDenyOnlyConfig(
+  config: FsReadRestrictionConfig,
+): config is FsReadDenyOnlyConfig {
+  return 'denyOnly' in config
+}
+
+/**
+ * Type guard to check if read config is allow-only mode
+ */
+export function isReadAllowOnlyConfig(
+  config: FsReadRestrictionConfig,
+): config is FsReadAllowOnlyConfig {
+  return 'allowOnly' in config
 }
 
 /**

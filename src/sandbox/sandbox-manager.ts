@@ -26,6 +26,7 @@ import {
 } from './macos-sandbox-utils.js'
 import {
   getDefaultWritePaths,
+  getDefaultReadPaths,
   containsGlobChars,
   removeTrailingGlobSuffix,
 } from './sandbox-utils.js'
@@ -377,12 +378,42 @@ function getFsReadConfig(): FsReadRestrictionConfig {
     return { denyOnly: [] }
   }
 
+  // Check if allowRead mode is being used
+  if (config.filesystem.allowRead && config.filesystem.allowRead.length > 0) {
+    // Allow-only mode: only specified paths (plus system defaults) are readable
+    const allowPaths = config.filesystem.allowRead
+      .map(p => removeTrailingGlobSuffix(p))
+      .filter(p => {
+        if (getPlatform() === 'linux' && containsGlobChars(p)) {
+          logForDebugging(`Skipping glob pattern on Linux/WSL: ${p}`)
+          return false
+        }
+        return true
+      })
+
+    const denyWithinAllowPaths = (config.filesystem.denyReadWithinAllow || [])
+      .map(p => removeTrailingGlobSuffix(p))
+      .filter(p => {
+        if (getPlatform() === 'linux' && containsGlobChars(p)) {
+          logForDebugging(`Skipping glob pattern on Linux/WSL: ${p}`)
+          return false
+        }
+        return true
+      })
+
+    return {
+      allowOnly: [...getDefaultReadPaths(), ...allowPaths],
+      denyWithinAllow: denyWithinAllowPaths,
+    }
+  }
+
+  // Deny-only mode (default): all reads allowed except denied paths
   // Filter out glob patterns on Linux/WSL (bubblewrap doesn't support globs)
-  const denyPaths = config.filesystem.denyRead
-    .map(path => removeTrailingGlobSuffix(path))
-    .filter(path => {
-      if (getPlatform() === 'linux' && containsGlobChars(path)) {
-        logForDebugging(`Skipping glob pattern on Linux/WSL: ${path}`)
+  const denyPaths = (config.filesystem.denyRead || [])
+    .map(p => removeTrailingGlobSuffix(p))
+    .filter(p => {
+      if (getPlatform() === 'linux' && containsGlobChars(p)) {
+        logForDebugging(`Skipping glob pattern on Linux/WSL: ${p}`)
         return false
       }
       return true
@@ -534,10 +565,30 @@ async function wrapWithSandbox(
     denyWithinAllow:
       customConfig?.filesystem?.denyWrite ?? config?.filesystem.denyWrite ?? [],
   }
-  const readConfig = {
-    denyOnly:
-      customConfig?.filesystem?.denyRead ?? config?.filesystem.denyRead ?? [],
-  }
+  // Build read config - support both allow-only and deny-only modes
+  const customAllowRead = customConfig?.filesystem?.allowRead
+  const configAllowRead = config?.filesystem.allowRead
+  const hasAllowRead =
+    (customAllowRead && customAllowRead.length > 0) ||
+    (configAllowRead && configAllowRead.length > 0)
+
+  const readConfig: FsReadRestrictionConfig = hasAllowRead
+    ? {
+        allowOnly: [
+          ...getDefaultReadPaths(),
+          ...(customAllowRead ?? configAllowRead ?? []),
+        ],
+        denyWithinAllow:
+          customConfig?.filesystem?.denyReadWithinAllow ??
+          config?.filesystem.denyReadWithinAllow ??
+          [],
+      }
+    : {
+        denyOnly:
+          customConfig?.filesystem?.denyRead ??
+          config?.filesystem.denyRead ??
+          [],
+      }
 
   // Check if network config is specified - this determines if we need network restrictions
   // Network restriction is needed when:
@@ -855,7 +906,9 @@ function getLinuxGlobPatternWarnings(): string[] {
 
   // Check filesystem paths for glob patterns
   const allPaths = [
-    ...config.filesystem.denyRead,
+    ...(config.filesystem.denyRead || []),
+    ...(config.filesystem.allowRead || []),
+    ...(config.filesystem.denyReadWithinAllow || []),
     ...config.filesystem.allowWrite,
     ...config.filesystem.denyWrite,
   ]
