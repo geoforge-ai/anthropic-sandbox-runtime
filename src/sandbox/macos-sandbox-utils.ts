@@ -209,36 +209,106 @@ function generateReadRules(
   // Check which mode we're in
   if (isReadAllowOnlyConfig(config)) {
     // Allow-only mode: Only specified paths (plus system defaults) are readable
-    // macOS sandbox denies by default, so we just need to allow specific paths
+    //
+    // macOS sandbox approach for allow-only:
+    // 1. Allow all file-read* operations broadly (required for process startup)
+    // 2. Deny reads from major user-writable directories
+    // 3. Re-allow reads from specifically allowed paths
+    //
+    // This is necessary because macOS processes require many implicit file reads
+    // (frameworks, dyld, locale files, etc.) that would be impractical to enumerate.
 
-    // Generate allow rules for each allowed path
+    // Step 1: Start by allowing all reads (needed for process startup)
+    rules.push(`(allow file-read*)`)
+
+    // Step 2: Build a set of allowed paths for checking
+    // Include both the original path and the /private variant for macOS symlinks
+    const allowedPaths = new Set<string>()
     for (const pathPattern of config.allowOnly || []) {
       const normalizedPath = normalizePathForSandbox(pathPattern)
+      allowedPaths.add(normalizedPath)
 
-      if (containsGlobChars(normalizedPath)) {
-        // Use regex matching for glob patterns
-        const regexPattern = globToRegex(normalizedPath)
+      // Handle macOS symlinks: /var -> /private/var, /tmp -> /private/tmp
+      if (normalizedPath.startsWith('/var/')) {
+        allowedPaths.add('/private' + normalizedPath)
+      } else if (normalizedPath.startsWith('/tmp/')) {
+        allowedPaths.add('/private' + normalizedPath)
+      } else if (normalizedPath.startsWith('/private/var/')) {
+        allowedPaths.add(normalizedPath.replace('/private', ''))
+      } else if (normalizedPath.startsWith('/private/tmp/')) {
+        allowedPaths.add(normalizedPath.replace('/private', ''))
+      }
+    }
+
+    // Step 3: Deny major user-accessible directories that aren't in the allowlist
+    // These are directories that might contain sensitive user data
+    const majorUserDirs = [
+      '/Users',
+      '/home',
+      '/Volumes',
+      '/private/var/folders',
+      '/private/tmp',
+    ]
+
+    for (const dir of majorUserDirs) {
+      // Check if this directory or any of its children is in the allowlist
+      const isAllowedOrHasAllowedChild = Array.from(allowedPaths).some(
+        allowed =>
+          allowed === dir ||
+          allowed.startsWith(dir + '/') ||
+          dir.startsWith(allowed + '/'),
+      )
+
+      if (!isAllowedOrHasAllowedChild) {
+        // Fully deny this directory - nothing in it is allowed
         rules.push(
-          `(allow file-read*`,
-          `  (regex ${escapePath(regexPattern)})`,
-          `  (with message "${logTag}"))`,
-        )
-      } else {
-        // Use subpath matching for literal paths
-        rules.push(
-          `(allow file-read*`,
-          `  (subpath ${escapePath(normalizedPath)})`,
+          `(deny file-read*`,
+          `  (subpath ${escapePath(dir)})`,
           `  (with message "${logTag}"))`,
         )
       }
     }
 
-    // Generate deny rules for paths within allowed paths
+    // Step 4: For directories that have allowed children, deny the directory
+    // but then re-allow the specific allowed paths
+    for (const dir of majorUserDirs) {
+      const allowedChildPaths = Array.from(allowedPaths).filter(
+        allowed => allowed.startsWith(dir + '/') && allowed !== dir,
+      )
+
+      if (allowedChildPaths.length > 0) {
+        // Deny the parent directory
+        rules.push(
+          `(deny file-read*`,
+          `  (subpath ${escapePath(dir)})`,
+          `  (with message "${logTag}"))`,
+        )
+
+        // Re-allow specific child paths
+        for (const allowedPath of allowedChildPaths) {
+          if (containsGlobChars(allowedPath)) {
+            const regexPattern = globToRegex(allowedPath)
+            rules.push(
+              `(allow file-read*`,
+              `  (regex ${escapePath(regexPattern)})`,
+              `  (with message "${logTag}"))`,
+            )
+          } else {
+            rules.push(
+              `(allow file-read*`,
+              `  (subpath ${escapePath(allowedPath)})`,
+              `  (with message "${logTag}"))`,
+            )
+          }
+        }
+      }
+    }
+
+    // Step 5: Generate deny rules for paths within allowed paths (denyWithinAllow)
     for (const pathPattern of config.denyWithinAllow || []) {
       const normalizedPath = normalizePathForSandbox(pathPattern)
 
       if (containsGlobChars(normalizedPath)) {
-        // Use regex matching for glob patterns
         const regexPattern = globToRegex(normalizedPath)
         rules.push(
           `(deny file-read*`,
@@ -246,7 +316,6 @@ function generateReadRules(
           `  (with message "${logTag}"))`,
         )
       } else {
-        // Use subpath matching for literal paths
         rules.push(
           `(deny file-read*`,
           `  (subpath ${escapePath(normalizedPath)})`,
@@ -310,15 +379,31 @@ function generateWriteRules(
 
   const rules: string[] = []
 
-  // Automatically allow TMPDIR parent on macOS when write restrictions are enabled
+  // Check if any user-allowed paths are within TMPDIR
+  // If so, we should NOT auto-allow the entire TMPDIR parent (to respect user's isolation requirements)
   const tmpdirParents = getTmpdirParentIfMacOSPattern()
-  for (const tmpdirParent of tmpdirParents) {
-    const normalizedPath = normalizePathForSandbox(tmpdirParent)
-    rules.push(
-      `(allow file-write*`,
-      `  (subpath ${escapePath(normalizedPath)})`,
-      `  (with message "${logTag}"))`,
+  const userPaths = config.allowOnly || []
+
+  const hasUserPathsInTmpdir = userPaths.some(userPath => {
+    const normalizedUserPath = normalizePathForSandbox(userPath)
+    return tmpdirParents.some(
+      tmpdirParent =>
+        normalizedUserPath.startsWith(tmpdirParent + '/') ||
+        normalizedUserPath.startsWith(tmpdirParent + '/T/'),
     )
+  })
+
+  // Only auto-allow TMPDIR parent if user hasn't specified paths within it
+  // This preserves multi-tenant isolation when tenants are in the same TMPDIR
+  if (!hasUserPathsInTmpdir) {
+    for (const tmpdirParent of tmpdirParents) {
+      const normalizedPath = normalizePathForSandbox(tmpdirParent)
+      rules.push(
+        `(allow file-write*`,
+        `  (subpath ${escapePath(normalizedPath)})`,
+        `  (with message "${logTag}"))`,
+      )
+    }
   }
 
   // Generate allow rules
