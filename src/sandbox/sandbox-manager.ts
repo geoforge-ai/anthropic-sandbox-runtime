@@ -26,6 +26,7 @@ import {
 } from './macos-sandbox-utils.js'
 import {
   getDefaultWritePaths,
+  getDefaultReadPaths,
   containsGlobChars,
   removeTrailingGlobSuffix,
   expandGlobPattern,
@@ -378,11 +379,41 @@ function getFsReadConfig(): FsReadRestrictionConfig {
     return { denyOnly: [] }
   }
 
+  // Check if allowRead mode is being used
+  if (config.filesystem.allowRead && config.filesystem.allowRead.length > 0) {
+    // Allow-only mode: only specified paths (plus system defaults) are readable
+    const allowPaths = config.filesystem.allowRead
+      .map(p => removeTrailingGlobSuffix(p))
+      .filter(p => {
+        if (getPlatform() === 'linux' && containsGlobChars(p)) {
+          logForDebugging(`Skipping glob pattern on Linux/WSL: ${p}`)
+          return false
+        }
+        return true
+      })
+
+    const denyWithinAllowPaths = (config.filesystem.denyReadWithinAllow || [])
+      .map(p => removeTrailingGlobSuffix(p))
+      .filter(p => {
+        if (getPlatform() === 'linux' && containsGlobChars(p)) {
+          logForDebugging(`Skipping glob pattern on Linux/WSL: ${p}`)
+          return false
+        }
+        return true
+      })
+
+    return {
+      allowOnly: [...getDefaultReadPaths(), ...allowPaths],
+      denyWithinAllow: denyWithinAllowPaths,
+    }
+  }
+
+  // Deny-only mode (default): all reads allowed except denied paths
+  // Expand glob patterns on Linux (bubblewrap doesn't support globs)
   const denyPaths: string[] = []
-  for (const p of config.filesystem.denyRead) {
+  for (const p of config.filesystem.denyRead || []) {
     const stripped = removeTrailingGlobSuffix(p)
     if (getPlatform() === 'linux' && containsGlobChars(stripped)) {
-      // Expand glob to concrete paths on Linux (bubblewrap doesn't support globs)
       const expanded = expandGlobPattern(p)
       logForDebugging(
         `[Sandbox] Expanded glob pattern "${p}" to ${expanded.length} paths on Linux`,
@@ -539,19 +570,41 @@ async function wrapWithSandbox(
     denyWithinAllow:
       customConfig?.filesystem?.denyWrite ?? config?.filesystem.denyWrite ?? [],
   }
-  const rawDenyRead =
-    customConfig?.filesystem?.denyRead ?? config?.filesystem.denyRead ?? []
-  const expandedDenyRead: string[] = []
-  for (const p of rawDenyRead) {
-    const stripped = removeTrailingGlobSuffix(p)
-    if (getPlatform() === 'linux' && containsGlobChars(stripped)) {
-      expandedDenyRead.push(...expandGlobPattern(p))
-    } else {
-      expandedDenyRead.push(stripped)
+  // Build read config - support both allow-only and deny-only modes
+  const customAllowRead = customConfig?.filesystem?.allowRead
+  const configAllowRead = config?.filesystem.allowRead
+  const hasAllowRead =
+    (customAllowRead && customAllowRead.length > 0) ||
+    (configAllowRead && configAllowRead.length > 0)
+
+  let readConfig: FsReadRestrictionConfig
+  if (hasAllowRead) {
+    readConfig = {
+      allowOnly: [
+        ...getDefaultReadPaths(),
+        ...(customAllowRead ?? configAllowRead ?? []),
+      ],
+      denyWithinAllow:
+        customConfig?.filesystem?.denyReadWithinAllow ??
+        config?.filesystem.denyReadWithinAllow ??
+        [],
     }
-  }
-  const readConfig = {
-    denyOnly: expandedDenyRead,
+  } else {
+    // Deny-only mode: expand glob patterns on Linux
+    const rawDenyRead =
+      customConfig?.filesystem?.denyRead ?? config?.filesystem.denyRead ?? []
+    const expandedDenyRead: string[] = []
+    for (const p of rawDenyRead) {
+      const stripped = removeTrailingGlobSuffix(p)
+      if (getPlatform() === 'linux' && containsGlobChars(stripped)) {
+        expandedDenyRead.push(...expandGlobPattern(p))
+      } else {
+        expandedDenyRead.push(stripped)
+      }
+    }
+    readConfig = {
+      denyOnly: expandedDenyRead,
+    }
   }
 
   // Check if network config is specified - this determines if we need network restrictions
@@ -871,6 +924,8 @@ function getLinuxGlobPatternWarnings(): string[] {
   // Check filesystem paths for glob patterns
   // Note: denyRead is excluded because globs are now expanded to concrete paths on Linux
   const allPaths = [
+    ...(config.filesystem.allowRead || []),
+    ...(config.filesystem.denyReadWithinAllow || []),
     ...config.filesystem.allowWrite,
     ...config.filesystem.denyWrite,
   ]

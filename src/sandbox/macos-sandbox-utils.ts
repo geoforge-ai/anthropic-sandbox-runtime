@@ -17,6 +17,10 @@ import type {
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
 } from './sandbox-schemas.js'
+import {
+  isReadDenyOnlyConfig,
+  isReadAllowOnlyConfig,
+} from './sandbox-schemas.js'
 import type { IgnoreViolationsConfig } from './sandbox-config.js'
 
 export interface MacOSSandboxParams {
@@ -202,33 +206,92 @@ function generateReadRules(
 
   const rules: string[] = []
 
-  // Start by allowing everything
-  rules.push(`(allow file-read*)`)
+  // Check which mode we're in
+  if (isReadAllowOnlyConfig(config)) {
+    // Allow-only mode: Only specified paths (plus system defaults) are readable
+    // macOS sandbox denies by default, so we just need to allow specific paths
 
-  // Then deny specific paths
-  for (const pathPattern of config.denyOnly || []) {
-    const normalizedPath = normalizePathForSandbox(pathPattern)
+    // Generate allow rules for each allowed path
+    for (const pathPattern of config.allowOnly || []) {
+      const normalizedPath = normalizePathForSandbox(pathPattern)
 
-    if (containsGlobChars(normalizedPath)) {
-      // Use regex matching for glob patterns
-      const regexPattern = globToRegex(normalizedPath)
-      rules.push(
-        `(deny file-read*`,
-        `  (regex ${escapePath(regexPattern)})`,
-        `  (with message "${logTag}"))`,
-      )
-    } else {
-      // Use subpath matching for literal paths
-      rules.push(
-        `(deny file-read*`,
-        `  (subpath ${escapePath(normalizedPath)})`,
-        `  (with message "${logTag}"))`,
-      )
+      if (containsGlobChars(normalizedPath)) {
+        // Use regex matching for glob patterns
+        const regexPattern = globToRegex(normalizedPath)
+        rules.push(
+          `(allow file-read*`,
+          `  (regex ${escapePath(regexPattern)})`,
+          `  (with message "${logTag}"))`,
+        )
+      } else {
+        // Use subpath matching for literal paths
+        rules.push(
+          `(allow file-read*`,
+          `  (subpath ${escapePath(normalizedPath)})`,
+          `  (with message "${logTag}"))`,
+        )
+      }
     }
-  }
 
-  // Block file movement to prevent bypass via mv/rename
-  rules.push(...generateMoveBlockingRules(config.denyOnly || [], logTag))
+    // Generate deny rules for paths within allowed paths
+    for (const pathPattern of config.denyWithinAllow || []) {
+      const normalizedPath = normalizePathForSandbox(pathPattern)
+
+      if (containsGlobChars(normalizedPath)) {
+        // Use regex matching for glob patterns
+        const regexPattern = globToRegex(normalizedPath)
+        rules.push(
+          `(deny file-read*`,
+          `  (regex ${escapePath(regexPattern)})`,
+          `  (with message "${logTag}"))`,
+        )
+      } else {
+        // Use subpath matching for literal paths
+        rules.push(
+          `(deny file-read*`,
+          `  (subpath ${escapePath(normalizedPath)})`,
+          `  (with message "${logTag}"))`,
+        )
+      }
+    }
+
+    // Block file movement to prevent bypass via mv/rename
+    rules.push(
+      ...generateMoveBlockingRules(config.denyWithinAllow || [], logTag),
+    )
+  } else if (isReadDenyOnlyConfig(config)) {
+    // Deny-only mode (default): All reads allowed except specified paths
+    // Start by allowing everything
+    rules.push(`(allow file-read*)`)
+
+    // Then deny specific paths
+    for (const pathPattern of config.denyOnly || []) {
+      const normalizedPath = normalizePathForSandbox(pathPattern)
+
+      if (containsGlobChars(normalizedPath)) {
+        // Use regex matching for glob patterns
+        const regexPattern = globToRegex(normalizedPath)
+        rules.push(
+          `(deny file-read*`,
+          `  (regex ${escapePath(regexPattern)})`,
+          `  (with message "${logTag}"))`,
+        )
+      } else {
+        // Use subpath matching for literal paths
+        rules.push(
+          `(deny file-read*`,
+          `  (subpath ${escapePath(normalizedPath)})`,
+          `  (with message "${logTag}"))`,
+        )
+      }
+    }
+
+    // Block file movement to prevent bypass via mv/rename
+    rules.push(...generateMoveBlockingRules(config.denyOnly || [], logTag))
+  } else {
+    // Fallback: allow all reads
+    rules.push(`(allow file-read*)`)
+  }
 
   return rules
 }
@@ -619,8 +682,12 @@ export function wrapCommandWithSandboxMacOS(
 
   // Determine if we have restrictions to apply
   // Read: denyOnly pattern - empty array means no restrictions
+  //       allowOnly pattern - any config (even empty allowOnly) means restrictions
   // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
-  const hasReadRestrictions = readConfig && readConfig.denyOnly.length > 0
+  const hasReadRestrictions =
+    readConfig &&
+    ((isReadDenyOnlyConfig(readConfig) && readConfig.denyOnly.length > 0) ||
+      isReadAllowOnlyConfig(readConfig))
   const hasWriteRestrictions = writeConfig !== undefined
 
   // No sandboxing needed
