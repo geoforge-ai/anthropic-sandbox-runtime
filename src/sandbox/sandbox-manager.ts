@@ -28,6 +28,7 @@ import {
   getDefaultWritePaths,
   containsGlobChars,
   removeTrailingGlobSuffix,
+  expandGlobPattern,
 } from './sandbox-utils.js'
 import { SandboxViolationStore } from './sandbox-violation-store.js'
 import { EOL } from 'node:os'
@@ -363,16 +364,20 @@ function getFsReadConfig(): FsReadRestrictionConfig {
     return { denyOnly: [] }
   }
 
-  // Filter out glob patterns on Linux/WSL (bubblewrap doesn't support globs)
-  const denyPaths = config.filesystem.denyRead
-    .map(path => removeTrailingGlobSuffix(path))
-    .filter(path => {
-      if (getPlatform() === 'linux' && containsGlobChars(path)) {
-        logForDebugging(`Skipping glob pattern on Linux/WSL: ${path}`)
-        return false
-      }
-      return true
-    })
+  const denyPaths: string[] = []
+  for (const p of config.filesystem.denyRead) {
+    const stripped = removeTrailingGlobSuffix(p)
+    if (getPlatform() === 'linux' && containsGlobChars(stripped)) {
+      // Expand glob to concrete paths on Linux (bubblewrap doesn't support globs)
+      const expanded = expandGlobPattern(p)
+      logForDebugging(
+        `[Sandbox] Expanded glob pattern "${p}" to ${expanded.length} paths on Linux`,
+      )
+      denyPaths.push(...expanded)
+    } else {
+      denyPaths.push(stripped)
+    }
+  }
 
   return {
     denyOnly: denyPaths,
@@ -520,9 +525,19 @@ async function wrapWithSandbox(
     denyWithinAllow:
       customConfig?.filesystem?.denyWrite ?? config?.filesystem.denyWrite ?? [],
   }
+  const rawDenyRead =
+    customConfig?.filesystem?.denyRead ?? config?.filesystem.denyRead ?? []
+  const expandedDenyRead: string[] = []
+  for (const p of rawDenyRead) {
+    const stripped = removeTrailingGlobSuffix(p)
+    if (getPlatform() === 'linux' && containsGlobChars(stripped)) {
+      expandedDenyRead.push(...expandGlobPattern(p))
+    } else {
+      expandedDenyRead.push(stripped)
+    }
+  }
   const readConfig = {
-    denyOnly:
-      customConfig?.filesystem?.denyRead ?? config?.filesystem.denyRead ?? [],
+    denyOnly: expandedDenyRead,
   }
 
   // Check if network config is specified - this determines if we need network restrictions
@@ -833,8 +848,8 @@ function getLinuxGlobPatternWarnings(): string[] {
   const globPatterns: string[] = []
 
   // Check filesystem paths for glob patterns
+  // Note: denyRead is excluded because globs are now expanded to concrete paths on Linux
   const allPaths = [
-    ...config.filesystem.denyRead,
     ...config.filesystem.allowWrite,
     ...config.filesystem.denyWrite,
   ]

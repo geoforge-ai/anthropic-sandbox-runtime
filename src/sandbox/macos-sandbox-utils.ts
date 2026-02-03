@@ -8,9 +8,11 @@ import {
   encodeSandboxedCommand,
   decodeSandboxedCommand,
   containsGlobChars,
+  globToRegex,
   DANGEROUS_FILES,
   getDangerousDirectories,
 } from './sandbox-utils.js'
+
 import type {
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
@@ -78,43 +80,6 @@ export type SandboxViolationCallback = (
 ) => void
 
 const sessionSuffix = `_${Math.random().toString(36).slice(2, 11)}_SBX`
-
-/**
- * Convert a glob pattern to a regular expression for macOS sandbox profiles
- *
- * This implements gitignore-style pattern matching to match the behavior of the
- * `ignore` library used by the permission system/
- *
- * Supported patterns:
- * - * matches any characters except / (e.g., *.ts matches foo.ts but not foo/bar.ts)
- * - ** matches any characters including / (e.g., src/** /*.ts matches all .ts files in src/)
- * - ? matches any single character except / (e.g., file?.txt matches file1.txt)
- * - [abc] matches any character in the set (e.g., file[0-9].txt matches file3.txt)
- *
- * Note: This is designed for macOS sandbox (regex ...) syntax. The resulting regex
- * will be used in sandbox profiles like: (deny file-write* (regex "pattern"))
- *
- * Exported for testing purposes.
- */
-export function globToRegex(globPattern: string): string {
-  return (
-    '^' +
-    globPattern
-      // Escape regex special characters (except glob chars * ? [ ])
-      .replace(/[.^$+{}()|\\]/g, '\\$&')
-      // Escape unclosed brackets (no matching ])
-      .replace(/\[([^\]]*?)$/g, '\\[$1')
-      // Convert glob patterns to regex (order matters - ** before *)
-      .replace(/\*\*\//g, '__GLOBSTAR_SLASH__') // Placeholder for **/
-      .replace(/\*\*/g, '__GLOBSTAR__') // Placeholder for **
-      .replace(/\*/g, '[^/]*') // * matches anything except /
-      .replace(/\?/g, '[^/]') // ? matches single character except /
-      // Restore placeholders
-      .replace(/__GLOBSTAR_SLASH__/g, '(.*/)?') // **/ matches zero or more dirs
-      .replace(/__GLOBSTAR__/g, '.*') + // ** matches anything including /
-    '$'
-  )
-}
 
 /**
  * Generate a unique log tag for sandbox monitoring
