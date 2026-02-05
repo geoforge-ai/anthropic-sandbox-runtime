@@ -484,3 +484,82 @@ describe('SandboxManager.updateConfig integration (wrapWithSandbox)', () => {
     }
   })
 })
+
+describe('SandboxManager wildcard "*" in allowedDomains', () => {
+  afterEach(async () => {
+    await SandboxManager.reset()
+  })
+
+  it('should allow any domain when "*" is in allowedDomains', async () => {
+    await SandboxManager.initialize({
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    })
+
+    const proxyPort = SandboxManager.getProxyPort()
+    expect(proxyPort).toBeDefined()
+
+    // Any domain should be allowed
+    const result1 = await proxyRequest(proxyPort!, 'example.com')
+    expect(result1.allowed).toBe(true)
+
+    const result2 = await proxyRequest(proxyPort!, 'google.com')
+    expect(result2.allowed).toBe(true)
+
+    const result3 = await proxyRequest(proxyPort!, 'random-domain.io')
+    expect(result3.allowed).toBe(true)
+  })
+
+  it('should block deniedDomains even when "*" is in allowedDomains', async () => {
+    await SandboxManager.initialize({
+      network: {
+        allowedDomains: ['*'],
+        deniedDomains: ['metadata.google.internal', '169.254.169.254'],
+      },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    })
+
+    const proxyPort = SandboxManager.getProxyPort()
+    expect(proxyPort).toBeDefined()
+
+    // Regular domains should be allowed
+    const result1 = await proxyRequest(proxyPort!, 'example.com')
+    expect(result1.allowed).toBe(true)
+
+    // Denied domains should be blocked even with "*" in allowedDomains
+    const result2 = await proxyRequest(proxyPort!, 'metadata.google.internal')
+    expect(result2.allowed).toBe(false)
+
+    // IP addresses in deniedDomains should also be blocked
+    const result3 = await proxyRequest(proxyPort!, '169.254.169.254')
+    expect(result3.allowed).toBe(false)
+  })
+
+  it('should allow updating from specific domains to "*" wildcard', async () => {
+    // Start with specific allowed domains
+    await SandboxManager.initialize({
+      network: { allowedDomains: ['example.com'], deniedDomains: [] },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    })
+
+    const proxyPort = SandboxManager.getProxyPort()
+    expect(proxyPort).toBeDefined()
+
+    // Initially only example.com should be allowed
+    const result1 = await proxyRequest(proxyPort!, 'example.com')
+    expect(result1.allowed).toBe(true)
+
+    const result2 = await proxyRequest(proxyPort!, 'google.com')
+    expect(result2.allowed).toBe(false)
+
+    // Update to allow all with "*"
+    SandboxManager.updateConfig({
+      network: { allowedDomains: ['*'], deniedDomains: [] },
+      filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
+    })
+
+    // Now all domains should be allowed
+    const result3 = await proxyRequest(proxyPort!, 'google.com')
+    expect(result3.allowed).toBe(true)
+  })
+})

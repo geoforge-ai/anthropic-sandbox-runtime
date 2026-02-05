@@ -74,6 +74,11 @@ function registerCleanup(): void {
 }
 
 function matchesDomainPattern(hostname: string, pattern: string): boolean {
+  // Bare "*" matches everything (allow all)
+  if (pattern === '*') {
+    return true
+  }
+
   // Support wildcard patterns like *.example.com
   // This matches any subdomain but not the base domain itself
   if (pattern.startsWith('*.')) {

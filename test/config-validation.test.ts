@@ -127,16 +127,12 @@ describe('Config Validation', () => {
   })
 
   test('should validate wildcard domains correctly', () => {
-    const validWildcards = [
-      '*.example.com',
-      '*.github.io',
-      '*.co.uk',
-    ]
+    const validWildcards = ['*.example.com', '*.github.io', '*.co.uk']
 
     const invalidWildcards = [
-      '*example.com',  // Missing dot after asterisk
-      '*.com',         // No subdomain
-      '*.',            // Invalid format
+      '*example.com', // Missing dot after asterisk
+      '*.com', // No subdomain
+      '*.', // Invalid format
     ]
 
     for (const domain of validWildcards) {
@@ -224,5 +220,56 @@ describe('Config Validation', () => {
     if (result.success) {
       expect(result.data.ripgrep).toBeUndefined()
     }
+  })
+
+  test('should accept bare "*" wildcard in allowedDomains', () => {
+    const config = {
+      network: {
+        allowedDomains: ['*'],
+        deniedDomains: [],
+      },
+      filesystem: {
+        denyRead: [],
+        allowWrite: [],
+        denyWrite: [],
+      },
+    }
+
+    const result = SandboxRuntimeConfigSchema.safeParse(config)
+    expect(result.success).toBe(true)
+  })
+
+  test('should accept "*" with deniedDomains for blocking specific hosts', () => {
+    const config = {
+      network: {
+        allowedDomains: ['*'],
+        deniedDomains: ['metadata.google.internal', '169.254.169.254'],
+      },
+      filesystem: {
+        denyRead: [],
+        allowWrite: [],
+        denyWrite: [],
+      },
+    }
+
+    const result = SandboxRuntimeConfigSchema.safeParse(config)
+    expect(result.success).toBe(true)
+  })
+
+  test('should accept IP addresses in deniedDomains', () => {
+    const config = {
+      network: {
+        allowedDomains: ['example.com'],
+        deniedDomains: ['169.254.169.254', '10.0.0.1'],
+      },
+      filesystem: {
+        denyRead: [],
+        allowWrite: [],
+        denyWrite: [],
+      },
+    }
+
+    const result = SandboxRuntimeConfigSchema.safeParse(config)
+    expect(result.success).toBe(true)
   })
 })

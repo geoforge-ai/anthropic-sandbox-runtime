@@ -19,6 +19,9 @@ const domainPatternSchema = z.string().refine(
     // Allow localhost
     if (val === 'localhost') return true
 
+    // Allow bare "*" wildcard to mean "allow all domains"
+    if (val === '*') return true
+
     // Allow wildcard domains like *.example.com
     if (val.startsWith('*.')) {
       const domain = val.slice(2)
@@ -46,7 +49,7 @@ const domainPatternSchema = z.string().refine(
   },
   {
     message:
-      'Invalid domain pattern. Must be a valid domain (e.g., "example.com") or wildcard (e.g., "*.example.com"). Overly broad patterns like "*.com" or "*" are not allowed for security reasons.',
+      'Invalid domain pattern. Must be a valid domain (e.g., "example.com"), wildcard (e.g., "*.example.com"), or "*" to allow all domains.',
   },
 )
 
